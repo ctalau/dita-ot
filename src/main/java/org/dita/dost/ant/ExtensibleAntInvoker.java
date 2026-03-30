@@ -56,6 +56,7 @@ public final class ExtensibleAntInvoker extends Task {
 
   private DITAOTAntLogger logger;
   private final ModuleFactory factory = ModuleFactory.instance();
+  private static final String PIPELINE_TIMING_PROPERTY = "dita.pipeline.timing";
   /**
    * Pipeline attributes and parameters
    */
@@ -184,6 +185,12 @@ public final class ExtensibleAntInvoker extends Task {
 
     final Job job = getJob(getProject());
     final XMLUtils xmlUtils = getXmlUtils();
+    final boolean pipelineTimingEnabled = Boolean.parseBoolean(
+      Objects.requireNonNullElse(getProject().getUserProperty(PIPELINE_TIMING_PROPERTY), getProject().getProperty(PIPELINE_TIMING_PROPERTY))
+    );
+    final String pipelineName = Objects.requireNonNullElse(attrs.get("taskname"), Objects.requireNonNullElse(attrs.get("message"), "pipeline"));
+    final long pipelineStart = System.currentTimeMillis();
+    final List<String> moduleTimings = pipelineTimingEnabled ? new ArrayList<>() : Collections.emptyList();
 
     try {
       for (final ModuleElem m : modules) {
@@ -209,7 +216,20 @@ public final class ExtensibleAntInvoker extends Task {
         mod.setXmlUtils(xmlUtils);
         mod.execute(pipelineInput);
         long end = System.currentTimeMillis();
-        logger.debug("{0} processing took {1} ms", mod.getClass().getSimpleName(), end - start);
+        final long moduleDuration = end - start;
+        logger.debug("{0} processing took {1} ms", mod.getClass().getSimpleName(), moduleDuration);
+        if (pipelineTimingEnabled) {
+          moduleTimings.add(String.format("%s=%dms", mod.getClass().getSimpleName(), moduleDuration));
+        }
+      }
+      if (pipelineTimingEnabled) {
+        final long pipelineDuration = System.currentTimeMillis() - pipelineStart;
+        logger.info(
+          "Pipeline timing [{0}] total={1}ms modules=[{2}]",
+          pipelineName,
+          Long.toString(pipelineDuration),
+          String.join(", ", moduleTimings)
+        );
       }
     } catch (final DITAOTException e) {
       throw new BuildException(e.getMessage(), e);
