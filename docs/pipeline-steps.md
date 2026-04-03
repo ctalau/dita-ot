@@ -51,3 +51,7 @@ Detailed docs for steps above 3000 ms:
 - [Clean preprocess](steps/clean-preprocess.md)
 - [Read image metadata](steps/read-image-metadata.md)
 - [Convert DITA topic to HTML5](steps/convert-topic-to-html5.md)
+
+## Direct input documentation
+
+- [Direct inputs by step](step-direct-inputs.md)
