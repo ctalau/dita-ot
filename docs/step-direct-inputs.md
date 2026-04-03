@@ -11,6 +11,34 @@ Scope and rule used:
 
 - If a step reads intermediate files/job entries produced by earlier steps, that is documented as an intermediate direct input.
 - Intermediate reads are **not** treated as direct dependencies on original source files.
+- `ditafileset` in these Ant pipelines means "select files from the DITA-OT job inventory" (the `.job.xml` state under `${dita.temp.dir}`), typically filtered by flags such as `format`, `input`, `inputResource`, `conref`, and `processingRole`.
+
+### Job inventory and where it is created
+
+- The preprocess init step creates `${dita.temp.dir}/.job.xml`, which is the serialized inventory/state used by later `ditafileset` selections.
+
+```xml
+<mkdir dir="${dita.temp.dir}"/>
+<echoxml file="${dita.temp.dir}/.job.xml">
+  <job>
+    <property name="temp-file-name-scheme">
+      <string>org.dita.dost.module.reader.HashTempFileScheme</string>
+```
+
+- Code file: `src/main/plugins/org.dita.base/build_preprocess2_template.xml`.
+- The Java `Job` model reads `.job.xml` and exposes file entries/flags (format, has-conref, has-keyref, input, etc.) that pipeline modules query.
+
+```java
+private static final String JOB_FILE = ".job.xml";
+private static final String ELEMENT_FILES = "files";
+private static final String ELEMENT_FILE = "file";
+...
+if (getStore().exists(jobFile.toURI())) {
+  getStore().transform(jobFile.toURI(), new JobHandler(prop, files));
+}
+```
+
+- Code file: `src/main/java/org/dita/dost/util/Job.java`.
 
 ---
 
@@ -69,6 +97,7 @@ Scope and rule used:
 ```
 - Processing: module applies filtering conditions to job map entries.
 - Relevant parts: map elements and attributes controlled by profiling rules.
+- Yes, this step effectively means "intermediate map files **plus active filter rules**": map files are the content being filtered, and DITAVAL contributes the filter predicates.
 
 ### Input: DITAVAL file (`dita.input.valfile`, optional)
 - Code file: `src/main/plugins/org.dita.base/build_preprocess2_template.xml`
@@ -89,6 +118,7 @@ Scope and rule used:
 ```
 - Processing: module uses job map graph already built by prior steps.
 - Relevant parts: branch-copy/filter semantics from map branches.
+- Output format: rewritten intermediate map/topic entries in temp storage and updated job inventory (`.job.xml`), not a separate standalone report file.
 
 ---
 
@@ -122,6 +152,19 @@ Scope and rule used:
 ```
 - Processing: a follow-up mapref expansion pass after keyref processing in map stage.
 - Relevant parts: any mapref edges still requiring normalization/expansion.
+- Additional effective input: the in-memory key-space built by keyref processing.
+- In code, `KeyrefModule` builds the key-space from the input map and input-resource maps using `KeyrefReader`, merges scopes, and writes resulting map/job updates.
+
+```java
+final KeyrefReader reader = new KeyrefReader();
+...
+reader.read(job.tempDirURI.resolve(mapFile), doc);
+final KeyScope startScope = reader.getKeyDefinition();
+...
+final KeyScope rootScope = resourceMapFis ... .reduce(startScope, KeyScope::merge);
+```
+
+- Code file: `src/main/java/org/dita/dost/module/KeyrefModule.java`.
 
 ---
 
@@ -174,6 +217,21 @@ Scope and rule used:
 ```
 - Processing: discovers and reads topic sources into temporary job store.
 - Relevant parts: reachable topic refs from map graph; map-driven traversal scope.
+- Behavior detail: this step is not a pure byte-for-byte copy. `TopicReaderModule` parses inputs, discovers referenced resources, processes waitlists, handles conref bookkeeping, and persists job state.
+
+```java
+parseInputParameters(input);
+init();
+readResourceFiles();
+readStartFile();
+processWaitList();
+handleConref();
+outputResult();
+job.write();
+```
+
+- Code file: `src/main/java/org/dita/dost/module/reader/TopicReaderModule.java`.
+- Why expensive in practice: it traverses a potentially large map/topic graph, parses many files, updates job metadata, and performs initial filtering/validation hooks while populating the temp store.
 
 ### Input: optional resources (`args.resources`)
 - Code file: `src/main/plugins/org.dita.base/build_preprocess2_template.xml`
@@ -232,6 +290,16 @@ Scope and rule used:
 ```
 - Processing: resolves keyrefs in topic intermediates against built key-space.
 - Relevant parts: keyref-bearing elements and resulting resolved text/targets.
+- Additional effective input: the key-space object (`KeyScope`) built from map key definitions and keyscope hierarchy by `KeyrefReader`.
+
+```java
+reader.read(job.tempDirURI.resolve(mapFile), doc);
+final KeyScope startScope = reader.getKeyDefinition();
+...
+rootScope = resolveIntermediate(keyScopeWithParents);
+```
+
+- Code files: `src/main/java/org/dita/dost/module/KeyrefModule.java`, `src/main/java/org/dita/dost/reader/KeyrefReader.java`.
 
 ---
 
@@ -279,11 +347,24 @@ Scope and rule used:
 ```
 - Processing: resolves conref links in topic/map intermediates.
 - Relevant parts: conref addressing plus export-derived resolution context.
+- Caching suggestion for conref dependencies:
+  - Build an index keyed by **consumer file URI** -> set of referenced **conref target URIs + fragment IDs**.
+  - Include `conrefend` ranges and indirect chains in the closure.
+  - Invalidate a consumer when any target in its closure changes (content hash or mtime), and recompute closure if map/key context changes.
+  - Persist the index as a sidecar (for example JSON in temp/cache dir) keyed by pipeline config hash (`transtype`, filter file hash, include.rellinks, etc.).
 
 ### Input: `${dita.temp.dir}/export.xml`
 - Code file: `src/main/plugins/org.dita.base/build_preprocess2_template.xml` (`makeurl` + `EXPORTFILE`).
 - Processing: supplies supplemental lookup/context data.
 - Relevant parts: exported structures used by conref templates.
+- Export format note: this is an XML file (`export.xml`). In core code it is described as "*export.xml to store exported elements*".
+
+```java
+/**export.xml to store exported elements.*/
+public static final String FILE_NAME_EXPORT_XML = "export.xml";
+```
+
+- Code file: `src/main/java/org/dita/dost/util/Constants.java`.
 
 ---
 
@@ -344,6 +425,17 @@ Scope and rule used:
 ```
 - Processing: metadata is moved/pulled according to map/topic context using `mappull.xsl`.
 - Relevant parts: metadata-bearing elements and map linkage used for propagation.
+- Example:
+  - If map `topicref` provides metadata (for example `navtitle`, audience/product props), `MoveMetaModule` pushes/inserts that metadata into referenced topic/map targets via `DitaMetaWriter`/`DitaMapMetaWriter`.
+  - The same module also pulls topic-derived metadata back to map context using the configured stylesheet.
+
+```java
+final Map<URI, Map<String, Element>> mapSet = getMapMetadata(fis);
+pushMetadata(mapSet);
+pullTopicMetadata(input, fis);
+```
+
+- Code file: `src/main/java/org/dita/dost/module/MoveMetaModule.java`.
 
 ---
 
@@ -360,6 +452,21 @@ Scope and rule used:
 ```
 - Processing: related links are generated/relocated using map relationship data.
 - Relevant parts: relationship tables and link scopes affected by `include.rellinks`.
+- Where graph is generated: in this step, `MoveLinksModule` runs `maplink.xsl` against the input map to produce link mapping data.
+- Storage/format: the mapping is an in-memory DOM + Java map structure (`Map<File, Map<String, Element>>`), not a separate persisted graph file.
+- Output of this step: topic files in temp storage are rewritten in-place by `DitaLinksWriter` with inserted/relocated related links.
+
+```java
+transformer.setSource(source);
+transformer.setDestination(result);
+transformer.transform();
+final Map<File, Map<String, Element>> mapSet = getMapping(doc);
+...
+linkInserter.setCurrentFile(uri);
+linkInserter.write(new File(uri));
+```
+
+- Code file: `src/main/java/org/dita/dost/module/MoveLinksModule.java`.
 
 ---
 
@@ -376,6 +483,7 @@ Scope and rule used:
 ```
 - Processing: enriches links/xrefs with pulled metadata.
 - Relevant parts: xref/link elements, generated link text, table/figure link style knobs.
+- Output: rewritten intermediate topic files in `${dita.temp.dir}` (same logical files, updated content), which become inputs for later clean/html5 steps.
 
 ---
 
@@ -446,6 +554,7 @@ Scope and rule used:
 ```
 - Processing: controls topic-to-HTML template logic.
 - Relevant parts: template rules for elements, links, metadata, and output markup.
+- Output cardinality note: this is generally one output HTML file per **input topic file selected in the job fileset** (via mapper/extension), not strictly one output per topic element. Earlier chunk/copy-to processing can change which files exist in that selected input set.
 
 ### Input: optional DITAVAL/header/footer/CSS parameter files
 - Code file: `src/main/plugins/org.dita.html5/build_dita2html5.xml` (`html5.init` + `html5.topics` macro).
