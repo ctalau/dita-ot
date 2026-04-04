@@ -55,3 +55,4 @@ Detailed docs for steps above 3000 ms:
 ## Direct input documentation
 
 - [Direct inputs by step](step-direct-inputs.md)
+- [Artifacts by step (storage, structure, producer/consumer/modifier)](step-artifacts.md)
