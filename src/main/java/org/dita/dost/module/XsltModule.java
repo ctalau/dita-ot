@@ -15,9 +15,13 @@ import static org.dita.dost.util.XMLUtils.toMessageListener;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Map.Entry;
+import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.Source;
 import javax.xml.transform.URIResolver;
 import javax.xml.transform.stream.StreamSource;
@@ -33,6 +37,11 @@ import org.dita.dost.pipeline.AbstractPipelineOutput;
 import org.dita.dost.util.ChainedURIResolver;
 import org.dita.dost.util.Job;
 import org.xmlresolver.Resolver;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
 /**
  * XSLT processing module.
@@ -66,6 +75,10 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
   private XsltTransformer t;
   private Processor processor;
   private boolean parallel;
+  private boolean cacheEnabled;
+  private File cacheDir;
+  private final TopicTransformCache cache = new TopicTransformCache();
+  private String cacheContextHash;
 
   private void init() {
     if (catalog == null) {
@@ -101,11 +114,12 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
     logger.info("Loading stylesheet " + style.getSystemId());
     try {
       templates = xsltCompiler.compile(style);
+      cacheContextHash = getCacheContextHash();
     } catch (SaxonApiException e) {
       throw new RuntimeException("Failed to compile stylesheet '" + style.getSystemId() + "': " + e.getMessage(), e);
     }
     if (in != null) {
-      transform(in, out);
+      transformWithCache(in, out);
     } else if (parallel) {
       try {
         final List<Entry<File, File>> tmps = includes
@@ -116,6 +130,10 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
               final File in = baseDir.toPath().resolve(include.toPath()).toFile();
               final File out = getOutput(include.getPath());
               if (out == null) {
+                return null;
+              }
+              if (cacheEnabled && cacheDir != null) {
+                transformWithCache(in, out);
                 return null;
               }
               final XsltTransformer transformer = getTransformer();
@@ -159,10 +177,29 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
         if (out == null) {
           continue;
         }
-        transform(in, out);
+        transformWithCache(in, out);
       }
     }
     return null;
+  }
+
+  private void transformWithCache(final File in, final File out) throws DITAOTException {
+    if (!cacheEnabled || cacheDir == null) {
+      transform(in, out);
+      return;
+    }
+    try {
+      final String key = getCacheKey(in, out);
+      if (cache.restore(cacheDir.toPath(), key, out.toPath())) {
+        logger.info("Cache hit for " + in.toURI());
+        return;
+      }
+      transform(in, out);
+      cache.store(cacheDir.toPath(), key, out.toPath());
+    } catch (IOException e) {
+      logger.debug("Topic cache unavailable for " + in.toURI() + ": " + e.getMessage(), e);
+      transform(in, out);
+    }
   }
 
   private File getOutput(final String path) {
@@ -306,6 +343,148 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
         throw new DITAOTException(e);
       }
     }
+  }
+
+  public void setCacheEnabled(final boolean cacheEnabled) {
+    this.cacheEnabled = cacheEnabled;
+  }
+
+  public void setCacheDir(final File cacheDir) {
+    this.cacheDir = cacheDir;
+  }
+
+  private String getCacheContextHash() {
+    if (!cacheEnabled || cacheDir == null) {
+      return "";
+    }
+    final MessageDigest md = newDigest();
+    update(md, style.getSystemId());
+    params.entrySet().stream().sorted(Comparator.comparing(Entry::getKey)).forEach(e -> update(md, e.getKey() + "=" + e.getValue()));
+    params
+      .entrySet()
+      .stream()
+      .sorted(Comparator.comparing(Entry::getKey))
+      .forEach(e -> hashParameterFileContent(md, e.getValue()));
+    properties
+      .stringPropertyNames()
+      .stream()
+      .sorted()
+      .forEach(k -> update(md, k + "=" + properties.getProperty(k)));
+    update(md, extension);
+    update(md, mapper != null ? mapper.getClass().getName() : "");
+    return toHex(md.digest());
+  }
+
+  private void hashParameterFileContent(final MessageDigest md, final String value) {
+    if (value == null || value.isBlank()) {
+      return;
+    }
+    try {
+      final java.net.URI uri = java.net.URI.create(value);
+      if (!"file".equals(uri.getScheme())) {
+        return;
+      }
+      final File f = new File(uri);
+      if (!f.isFile()) {
+        return;
+      }
+      hashFile(md, f);
+    } catch (IllegalArgumentException | IOException e) {
+      logger.debug("Failed to hash cache parameter dependency '" + value + "': " + e.getMessage(), e);
+    }
+  }
+
+  private String getCacheKey(final File in, final File out) throws IOException {
+    final MessageDigest md = newDigest();
+    update(md, cacheContextHash);
+    update(md, out.getPath());
+    hashFile(md, in);
+    for (File dependency : collectDitaDependencies(in)) {
+      hashFile(md, dependency);
+    }
+    return toHex(md.digest());
+  }
+
+  private MessageDigest newDigest() {
+    try {
+      return MessageDigest.getInstance("SHA-256");
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private void update(final MessageDigest md, final String value) {
+    md.update((value != null ? value : "").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    md.update((byte) 0);
+  }
+
+  private void hashFile(final MessageDigest md, final File file) throws IOException {
+    update(md, file.getAbsolutePath());
+    try (InputStream is = job.getStore().getInputStream(file.toURI())) {
+      final byte[] buf = new byte[8192];
+      int read;
+      while ((read = is.read(buf)) != -1) {
+        md.update(buf, 0, read);
+      }
+    }
+    md.update((byte) 0);
+  }
+
+  private Collection<File> collectDitaDependencies(final File topic) {
+    try {
+      final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+      factory.setNamespaceAware(false);
+      final Document doc = factory.newDocumentBuilder().parse(topic);
+      final Set<File> dependencies = new TreeSet<>(Comparator.comparing(File::getAbsolutePath));
+      collectDitaDependencies(doc.getDocumentElement(), topic.getParentFile(), dependencies);
+      dependencies.remove(topic);
+      return dependencies;
+    } catch (Exception e) {
+      logger.debug("Failed to resolve topic dependency closure for " + topic.toURI() + ": " + e.getMessage(), e);
+      return Collections.emptyList();
+    }
+  }
+
+  private void collectDitaDependencies(final Element element, final File baseDir, final Set<File> dependencies) {
+    final NamedNodeMap attrs = element.getAttributes();
+    for (int i = 0; i < attrs.getLength(); i++) {
+      final Node attr = attrs.item(i);
+      final String localName = attr.getNodeName();
+      if (!("href".equals(localName) || "conref".equals(localName))) {
+        continue;
+      }
+      final String value = attr.getNodeValue();
+      if (value == null || value.isBlank()) {
+        continue;
+      }
+      final String withoutFragment = value.split("#", 2)[0];
+      if (withoutFragment.isBlank() || withoutFragment.contains(":")) {
+        continue;
+      }
+      final String lower = withoutFragment.toLowerCase(Locale.ROOT);
+      if (!(lower.endsWith(".dita") || lower.endsWith(".xml"))) {
+        continue;
+      }
+      final File dependency = new File(baseDir, withoutFragment).getAbsoluteFile();
+      if (dependency.isFile()) {
+        dependencies.add(dependency);
+      }
+    }
+    final NodeList childNodes = element.getChildNodes();
+    for (int i = 0; i < childNodes.getLength(); i++) {
+      final Node child = childNodes.item(i);
+      if (child instanceof final Element childElement) {
+        collectDitaDependencies(childElement, baseDir, dependencies);
+      }
+    }
+  }
+
+  private String toHex(final byte[] data) {
+    final StringBuilder b = new StringBuilder(data.length * 2);
+    for (byte by : data) {
+      b.append(String.format("%02x", by));
+    }
+    return b.toString();
   }
 
   /**

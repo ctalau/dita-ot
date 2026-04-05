@@ -185,9 +185,12 @@ public final class ExtensibleAntInvoker extends Task {
 
     final Job job = getJob(getProject());
     final XMLUtils xmlUtils = getXmlUtils();
-    final boolean pipelineTimingEnabled = Boolean.parseBoolean(
-      Objects.requireNonNullElse(getProject().getUserProperty(PIPELINE_TIMING_PROPERTY), getProject().getProperty(PIPELINE_TIMING_PROPERTY))
-    );
+    final String userPipelineTimingProperty = getProject().getUserProperty(PIPELINE_TIMING_PROPERTY);
+    final String projectPipelineTimingProperty = getProject().getProperty(PIPELINE_TIMING_PROPERTY);
+    final String pipelineTimingProperty = userPipelineTimingProperty != null
+      ? userPipelineTimingProperty
+      : (projectPipelineTimingProperty != null ? projectPipelineTimingProperty : "false");
+    final boolean pipelineTimingEnabled = Boolean.parseBoolean(pipelineTimingProperty);
     final String pipelineName = Objects.requireNonNullElse(attrs.get("taskname"), Objects.requireNonNullElse(attrs.get("message"), "pipeline"));
     final long pipelineStart = System.currentTimeMillis();
     final List<String> moduleTimings = pipelineTimingEnabled ? new ArrayList<>() : Collections.emptyList();
@@ -264,6 +267,8 @@ public final class ExtensibleAntInvoker extends Task {
       module.setFiledirParam(xm.filedirparameter);
       module.setReloadstylesheet(xm.reloadstylesheet);
       module.setParallel(xm.parallel);
+      module.setCacheDir(xm.cachedir);
+      module.setCacheEnabled(xm.cacheenabled);
       module.setProcessingMode(processingMode);
       module.setXMLCatalog(xm.xmlcatalog);
       if (xm.mapper != null) {
@@ -544,6 +549,8 @@ public final class ExtensibleAntInvoker extends Task {
     private XMLCatalog xmlcatalog;
     private boolean reloadstylesheet;
     private boolean parallel;
+    private File cachedir;
+    private boolean cacheenabled;
     private Resource xslResource;
 
     // Ant setters
@@ -579,6 +586,14 @@ public final class ExtensibleAntInvoker extends Task {
 
     public void setParallel(final boolean parallel) {
       this.parallel = parallel;
+    }
+
+    public void setCachedir(final File cachedir) {
+      this.cachedir = cachedir;
+    }
+
+    public void setCacheenabled(final boolean cacheenabled) {
+      this.cacheenabled = cacheenabled;
     }
 
     public void setIn(final File in) {
