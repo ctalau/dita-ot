@@ -15,7 +15,10 @@ import static org.dita.dost.util.XMLUtils.toMessageListener;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Map.Entry;
 import javax.xml.transform.Source;
@@ -66,6 +69,10 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
   private XsltTransformer t;
   private Processor processor;
   private boolean parallel;
+  private boolean cacheEnabled;
+  private File cacheDir;
+  private final TopicTransformCache cache = new TopicTransformCache();
+  private String cacheContextHash;
 
   private void init() {
     if (catalog == null) {
@@ -101,11 +108,12 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
     logger.info("Loading stylesheet " + style.getSystemId());
     try {
       templates = xsltCompiler.compile(style);
+      cacheContextHash = getCacheContextHash();
     } catch (SaxonApiException e) {
       throw new RuntimeException("Failed to compile stylesheet '" + style.getSystemId() + "': " + e.getMessage(), e);
     }
     if (in != null) {
-      transform(in, out);
+      transformWithCache(in, out);
     } else if (parallel) {
       try {
         final List<Entry<File, File>> tmps = includes
@@ -116,6 +124,10 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
               final File in = baseDir.toPath().resolve(include.toPath()).toFile();
               final File out = getOutput(include.getPath());
               if (out == null) {
+                return null;
+              }
+              if (cacheEnabled && cacheDir != null) {
+                transformWithCache(in, out);
                 return null;
               }
               final XsltTransformer transformer = getTransformer();
@@ -159,10 +171,29 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
         if (out == null) {
           continue;
         }
-        transform(in, out);
+        transformWithCache(in, out);
       }
     }
     return null;
+  }
+
+  private void transformWithCache(final File in, final File out) throws DITAOTException {
+    if (!cacheEnabled || cacheDir == null) {
+      transform(in, out);
+      return;
+    }
+    try {
+      final String key = getCacheKey(in, out);
+      if (cache.restore(cacheDir.toPath(), key, out.toPath())) {
+        logger.info("Cache hit for " + in.toURI());
+        return;
+      }
+      transform(in, out);
+      cache.store(cacheDir.toPath(), key, out.toPath());
+    } catch (IOException e) {
+      logger.debug("Topic cache unavailable for " + in.toURI() + ": " + e.getMessage(), e);
+      transform(in, out);
+    }
   }
 
   private File getOutput(final String path) {
@@ -306,6 +337,66 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
         throw new DITAOTException(e);
       }
     }
+  }
+
+  public void setCacheEnabled(final boolean cacheEnabled) {
+    this.cacheEnabled = cacheEnabled;
+  }
+
+  public void setCacheDir(final File cacheDir) {
+    this.cacheDir = cacheDir;
+  }
+
+  private String getCacheContextHash() {
+    if (!cacheEnabled || cacheDir == null) {
+      return "";
+    }
+    final MessageDigest md = newDigest();
+    update(md, style.getSystemId());
+    params.entrySet().stream().sorted(Comparator.comparing(Entry::getKey)).forEach(e -> update(md, e.getKey() + "=" + e.getValue()));
+    properties
+      .stringPropertyNames()
+      .stream()
+      .sorted()
+      .forEach(k -> update(md, k + "=" + properties.getProperty(k)));
+    update(md, extension);
+    update(md, mapper != null ? mapper.getClass().getName() : "");
+    return toHex(md.digest());
+  }
+
+  private String getCacheKey(final File in, final File out) throws IOException {
+    final MessageDigest md = newDigest();
+    update(md, cacheContextHash);
+    update(md, out.getPath());
+    try (InputStream is = job.getStore().getInputStream(in.toURI())) {
+      final byte[] buf = new byte[8192];
+      int read;
+      while ((read = is.read(buf)) != -1) {
+        md.update(buf, 0, read);
+      }
+    }
+    return toHex(md.digest());
+  }
+
+  private MessageDigest newDigest() {
+    try {
+      return MessageDigest.getInstance("SHA-256");
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private void update(final MessageDigest md, final String value) {
+    md.update((value != null ? value : "").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    md.update((byte) 0);
+  }
+
+  private String toHex(final byte[] data) {
+    final StringBuilder b = new StringBuilder(data.length * 2);
+    for (byte by : data) {
+      b.append(String.format("%02x", by));
+    }
+    return b.toString();
   }
 
   /**

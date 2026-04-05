@@ -264,6 +264,8 @@ public final class ExtensibleAntInvoker extends Task {
       module.setFiledirParam(xm.filedirparameter);
       module.setReloadstylesheet(xm.reloadstylesheet);
       module.setParallel(xm.parallel);
+      module.setCacheDir(xm.cachedir);
+      module.setCacheEnabled(xm.cacheenabled);
       module.setProcessingMode(processingMode);
       module.setXMLCatalog(xm.xmlcatalog);
       if (xm.mapper != null) {
@@ -544,6 +546,8 @@ public final class ExtensibleAntInvoker extends Task {
     private XMLCatalog xmlcatalog;
     private boolean reloadstylesheet;
     private boolean parallel;
+    private File cachedir;
+    private boolean cacheenabled;
     private Resource xslResource;
 
     // Ant setters
@@ -579,6 +583,14 @@ public final class ExtensibleAntInvoker extends Task {
 
     public void setParallel(final boolean parallel) {
       this.parallel = parallel;
+    }
+
+    public void setCachedir(final File cachedir) {
+      this.cachedir = cachedir;
+    }
+
+    public void setCacheenabled(final boolean cacheenabled) {
+      this.cacheenabled = cacheenabled;
     }
 
     public void setIn(final File in) {

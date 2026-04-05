@@ -8,10 +8,11 @@ Validate `.dita-cache/` reuse behavior and prove correctness against direct DITA
   - **Thread A:** build `initial` -> persist `.dita-cache` -> build `modified` using cache.
   - **Thread B:** build `modified` directly without cache reuse.
   - Compare resulting outputs and report timing speedup.
+- Added optional fixture assertions for minimum cache-hit count by placing `expect-cache-hit-min.txt` in a fixture.
 - Added fixture structure with `initial/` and `modified/` plus per-fixture README files.
 
 ## What didn't
-- This experiment does not implement a cache algorithm; it only validates reuse by copying `.dita-cache/` between builds.
+- This experiment does not implement a cache algorithm; it validates behavior of the current implementation and cache transfer.
 - Some runtime/environment factors can still affect byte-for-byte outputs on certain systems (for example locale-specific tooling behavior).
 
 ## What we could try further

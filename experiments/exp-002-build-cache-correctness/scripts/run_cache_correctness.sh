@@ -7,6 +7,7 @@ DITA_BIN="${DITA_BIN:-$ROOT_DIR/src/main/bin/dita}"
 INPUT_FILE="${INPUT_FILE:-main.ditamap}"
 FORMAT="${FORMAT:-html5}"
 KEEP_WORKDIRS="${KEEP_WORKDIRS:-0}"
+RUN_DITA_LAST_OUTPUT=""
 
 now_ms() {
   python3 - <<'PY'
@@ -31,6 +32,7 @@ run_dita_build() {
         --clean.temp=yes
     ) 2>&1
   )" || {
+    RUN_DITA_LAST_OUTPUT="$output"
     echo "$output" >&2
     return 1
   }
@@ -39,6 +41,8 @@ run_dita_build() {
     echo "$output" >&2
     return 1
   fi
+
+  RUN_DITA_LAST_OUTPUT="$output"
 }
 
 copy_cache() {
@@ -99,6 +103,7 @@ run_fixture() {
   local start_cached end_cached cached_ms
   start_cached="$(now_ms)"
   run_dita_build "$thread_a" "$thread_a/out-modified"
+  local cached_log="$RUN_DITA_LAST_OUTPUT"
   end_cached="$(now_ms)"
   cached_ms=$((end_cached - start_cached))
 
@@ -119,6 +124,17 @@ run_fixture() {
   local status="PASS"
   if [[ "$hash_a" != "$hash_b" ]]; then
     status="FAIL"
+  fi
+
+  local expect_cache_hit_min_file="$fixture_dir/expect-cache-hit-min.txt"
+  if [[ -f "$expect_cache_hit_min_file" ]]; then
+    local expected_hits actual_hits
+    expected_hits="$(tr -d '[:space:]' < "$expect_cache_hit_min_file")"
+    actual_hits="$(printf '%s\n' "$cached_log" | grep -c "Cache hit for " || true)"
+    if [[ "$actual_hits" -lt "$expected_hits" ]]; then
+      status="FAIL"
+      echo "Expected at least $expected_hits cache hits for fixture '$fixture_name', saw $actual_hits" >&2
+    fi
   fi
 
   local speedup="n/a"
