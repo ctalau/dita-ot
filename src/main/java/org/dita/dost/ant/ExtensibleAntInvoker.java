@@ -185,9 +185,12 @@ public final class ExtensibleAntInvoker extends Task {
 
     final Job job = getJob(getProject());
     final XMLUtils xmlUtils = getXmlUtils();
-    final boolean pipelineTimingEnabled = Boolean.parseBoolean(
-      Objects.requireNonNullElse(getProject().getUserProperty(PIPELINE_TIMING_PROPERTY), getProject().getProperty(PIPELINE_TIMING_PROPERTY))
-    );
+    final String userPipelineTimingProperty = getProject().getUserProperty(PIPELINE_TIMING_PROPERTY);
+    final String projectPipelineTimingProperty = getProject().getProperty(PIPELINE_TIMING_PROPERTY);
+    final String pipelineTimingProperty = userPipelineTimingProperty != null
+      ? userPipelineTimingProperty
+      : (projectPipelineTimingProperty != null ? projectPipelineTimingProperty : "false");
+    final boolean pipelineTimingEnabled = Boolean.parseBoolean(pipelineTimingProperty);
     final String pipelineName = Objects.requireNonNullElse(attrs.get("taskname"), Objects.requireNonNullElse(attrs.get("message"), "pipeline"));
     final long pipelineStart = System.currentTimeMillis();
     final List<String> moduleTimings = pipelineTimingEnabled ? new ArrayList<>() : Collections.emptyList();

@@ -21,6 +21,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.Map.Entry;
+import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.Source;
 import javax.xml.transform.URIResolver;
 import javax.xml.transform.stream.StreamSource;
@@ -36,6 +37,11 @@ import org.dita.dost.pipeline.AbstractPipelineOutput;
 import org.dita.dost.util.ChainedURIResolver;
 import org.dita.dost.util.Job;
 import org.xmlresolver.Resolver;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
 /**
  * XSLT processing module.
@@ -354,6 +360,11 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
     final MessageDigest md = newDigest();
     update(md, style.getSystemId());
     params.entrySet().stream().sorted(Comparator.comparing(Entry::getKey)).forEach(e -> update(md, e.getKey() + "=" + e.getValue()));
+    params
+      .entrySet()
+      .stream()
+      .sorted(Comparator.comparing(Entry::getKey))
+      .forEach(e -> hashParameterFileContent(md, e.getValue()));
     properties
       .stringPropertyNames()
       .stream()
@@ -364,16 +375,32 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
     return toHex(md.digest());
   }
 
+  private void hashParameterFileContent(final MessageDigest md, final String value) {
+    if (value == null || value.isBlank()) {
+      return;
+    }
+    try {
+      final java.net.URI uri = java.net.URI.create(value);
+      if (!"file".equals(uri.getScheme())) {
+        return;
+      }
+      final File f = new File(uri);
+      if (!f.isFile()) {
+        return;
+      }
+      hashFile(md, f);
+    } catch (IllegalArgumentException | IOException e) {
+      logger.debug("Failed to hash cache parameter dependency '" + value + "': " + e.getMessage(), e);
+    }
+  }
+
   private String getCacheKey(final File in, final File out) throws IOException {
     final MessageDigest md = newDigest();
     update(md, cacheContextHash);
     update(md, out.getPath());
-    try (InputStream is = job.getStore().getInputStream(in.toURI())) {
-      final byte[] buf = new byte[8192];
-      int read;
-      while ((read = is.read(buf)) != -1) {
-        md.update(buf, 0, read);
-      }
+    hashFile(md, in);
+    for (File dependency : collectDitaDependencies(in)) {
+      hashFile(md, dependency);
     }
     return toHex(md.digest());
   }
@@ -389,6 +416,67 @@ public final class XsltModule extends AbstractPipelineModuleImpl {
   private void update(final MessageDigest md, final String value) {
     md.update((value != null ? value : "").getBytes(java.nio.charset.StandardCharsets.UTF_8));
     md.update((byte) 0);
+  }
+
+  private void hashFile(final MessageDigest md, final File file) throws IOException {
+    update(md, file.getAbsolutePath());
+    try (InputStream is = job.getStore().getInputStream(file.toURI())) {
+      final byte[] buf = new byte[8192];
+      int read;
+      while ((read = is.read(buf)) != -1) {
+        md.update(buf, 0, read);
+      }
+    }
+    md.update((byte) 0);
+  }
+
+  private Collection<File> collectDitaDependencies(final File topic) {
+    try {
+      final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+      factory.setNamespaceAware(false);
+      final Document doc = factory.newDocumentBuilder().parse(topic);
+      final Set<File> dependencies = new TreeSet<>(Comparator.comparing(File::getAbsolutePath));
+      collectDitaDependencies(doc.getDocumentElement(), topic.getParentFile(), dependencies);
+      dependencies.remove(topic);
+      return dependencies;
+    } catch (Exception e) {
+      logger.debug("Failed to resolve topic dependency closure for " + topic.toURI() + ": " + e.getMessage(), e);
+      return Collections.emptyList();
+    }
+  }
+
+  private void collectDitaDependencies(final Element element, final File baseDir, final Set<File> dependencies) {
+    final NamedNodeMap attrs = element.getAttributes();
+    for (int i = 0; i < attrs.getLength(); i++) {
+      final Node attr = attrs.item(i);
+      final String localName = attr.getNodeName();
+      if (!("href".equals(localName) || "conref".equals(localName))) {
+        continue;
+      }
+      final String value = attr.getNodeValue();
+      if (value == null || value.isBlank()) {
+        continue;
+      }
+      final String withoutFragment = value.split("#", 2)[0];
+      if (withoutFragment.isBlank() || withoutFragment.contains(":")) {
+        continue;
+      }
+      final String lower = withoutFragment.toLowerCase(Locale.ROOT);
+      if (!(lower.endsWith(".dita") || lower.endsWith(".xml"))) {
+        continue;
+      }
+      final File dependency = new File(baseDir, withoutFragment).getAbsoluteFile();
+      if (dependency.isFile()) {
+        dependencies.add(dependency);
+      }
+    }
+    final NodeList childNodes = element.getChildNodes();
+    for (int i = 0; i < childNodes.getLength(); i++) {
+      final Node child = childNodes.item(i);
+      if (child instanceof final Element childElement) {
+        collectDitaDependencies(childElement, baseDir, dependencies);
+      }
+    }
   }
 
   private String toHex(final byte[] data) {

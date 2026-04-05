@@ -47,6 +47,33 @@ class TopicCacheCorrectnessTest {
     assertTrue(cachedRunLog.contains("Cache hit for "), "Expected cached run to report at least one cache hit");
   }
 
+  @Test
+  void glossaryTargetChangeInvalidatesTopicCache() throws Exception {
+    final Path src = tempDir.resolve("src-glossary");
+    Files.createDirectories(src);
+    writeGlossarySources(src, "XML");
+
+    final Path cacheDir = tempDir.resolve("cache-glossary");
+    final Path outInitial = tempDir.resolve("out-glossary-initial");
+    final Path outCached = tempDir.resolve("out-glossary-cached");
+    final Path outDirect = tempDir.resolve("out-glossary-direct");
+    final Path runTemp = tempDir.resolve("run-temp-glossary");
+    Files.createDirectories(runTemp);
+
+    runHtml5(src, outInitial, cacheDir, runTemp);
+    writeGlossarySources(src, "Extensible Markup Language");
+    runHtml5(src, outCached, cacheDir, runTemp);
+    final String cachedRunLog = latestLog(runTemp);
+
+    runHtml5(src, outDirect, tempDir.resolve("cache-glossary-direct"), runTemp);
+
+    assertEquals(hashDir(outDirect), hashDir(outCached));
+    assertTrue(
+      !cachedRunLog.contains("Cache hit for ") || !cachedRunLog.contains("topic.dita"),
+      "Expected topic transform cache to be invalidated when glossary target changes"
+    );
+  }
+
   private void runHtml5(final Path srcDir, final Path outDir, final Path cacheDir, final Path runTemp)
     throws DITAOTException {
     final File ditaDir = new File("src/main").getAbsoluteFile();
@@ -103,6 +130,43 @@ class TopicCacheCorrectnessTest {
       final Path log = logs.filter(p -> p.getFileName().toString().endsWith(".log")).max(Comparator.naturalOrder()).orElseThrow();
       return Files.readString(log, UTF_8);
     }
+  }
+
+  private void writeGlossarySources(final Path srcDir, final String glossSurface) throws IOException {
+    Files.writeString(
+      srcDir.resolve("main.ditamap"),
+      """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <map>
+        <title>Glossary cache correctness</title>
+        <topicref href="topic.dita"/>
+      </map>
+      """,
+      UTF_8
+    );
+    Files.writeString(
+      srcDir.resolve("topic.dita"),
+      """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <topic id="topic">
+        <title>Topic</title>
+        <body>
+          <p><term href="glossentry.dita#g">%s</term></p>
+        </body>
+      </topic>
+      """.formatted(glossSurface),
+      UTF_8
+    );
+    Files.writeString(
+      srcDir.resolve("glossentry.dita"),
+      """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <glossentry id="g">
+        <glossterm>%s</glossterm>
+      </glossentry>
+      """.formatted(glossSurface),
+      UTF_8
+    );
   }
 
   private String hashDir(final Path dir) throws IOException {
